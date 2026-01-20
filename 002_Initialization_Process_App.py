@@ -40,6 +40,69 @@ def format_label(text):
         return text
     return str(text).replace('_', ' ').title()
 
+def process_market_characterization(customer_building_type_count, equipment_count_per_building, efficiency_level_breakout):
+    """
+    Process the three market characterization input sheets to generate df_yr1
+    Replicates the logic from 001_Market_Characterization.ipynb
+    """
+    # Get all columns from efficiency_level_breakout
+    all_columns = efficiency_level_breakout.columns.tolist()
+    
+    # Define columns to exclude (non-building type columns)
+    exclude_columns = ['competition_group', 'subgroup', 'condition_name', 'condition']
+    
+    # Filter to get only building type columns
+    building_types = [col for col in all_columns if col not in exclude_columns]
+    
+    # Create a Cartesian product: each row in customer_building_type_count × all rows in equipment_count_per_building
+    result_rows = []
+    
+    # Iterate over each row in customer_building_type_count (each utility combo)
+    for cust_idx, cust_row in customer_building_type_count.iterrows():
+        # For each equipment row
+        for equip_idx, equip_row in equipment_count_per_building.iterrows():
+            # Create a new row combining customer info and multiplied equipment counts
+            new_row = {}
+            
+            # Copy non-building-type columns from customer row (e.g., electric_utility, gas_utility)
+            for col in customer_building_type_count.columns:
+                if col not in building_types:
+                    new_row[col] = cust_row[col]
+            
+            # Copy non-building-type columns from equipment row (e.g., competition_group, subgroup, condition_name)
+            for col in equipment_count_per_building.columns:
+                if col not in building_types:
+                    new_row[col] = equip_row[col]
+            
+            # Multiply each building type count: equipment_count × customer_building_count
+            for building_type in building_types:
+                equip_count = equip_row.get(building_type, 0)
+                cust_count = cust_row.get(building_type, 0)
+                new_row[building_type] = equip_count * cust_count
+            
+            result_rows.append(new_row)
+    
+    # Create the new dataframe from the combined rows
+    equipment_count_total = pd.DataFrame(result_rows)
+    
+    # Merge equipment_count_total and efficiency_level_breakout on 'condition_name' and 'competition_group'
+    merged_df = pd.merge(
+        efficiency_level_breakout,
+        equipment_count_total,
+        on=["competition_group", "subgroup"],
+        suffixes=("_eff", "_equip")
+    )
+    
+    # Multiply building type columns where matches occur
+    for building_type in building_types:
+        merged_df[building_type + "_year_one"] = merged_df[building_type + "_eff"] * merged_df[building_type + "_equip"]
+    
+    # Drop columns ending with _eff and _equip from merged_df
+    cols_to_drop = [col for col in merged_df.columns if col.endswith('_eff') or col.endswith('_equip')]
+    df_yr1 = merged_df.drop(columns=cols_to_drop)
+    
+    return df_yr1
+
 # File upload section
 st.header("📁 Upload Data Files")
 
@@ -53,25 +116,109 @@ with col1:
     )
 
 with col2:
-    market_char_file = st.file_uploader(
-        "Market Characterization (Year 1)",
-        type=['xlsx', 'xls'],
-        help="Upload the df_yr1 market characterization output file"
-    )
-
-with col3:
     condition_energy_file = st.file_uploader(
         "Condition Energy Usage Template",
         type=['xlsx', 'xls'],
         help="Upload the condition energy usage template file"
     )
 
-# Check if all files are uploaded
-if utility_forecast_file and market_char_file and condition_energy_file:
+# Market Characterization input options
+st.subheader("📊 Market Characterization Input")
+st.markdown("Choose how to provide Market Characterization data:")
+
+market_char_option = st.radio(
+    "Select input method:",
+    ["Upload processed Market Characterization file", "Upload source files and calculate"],
+    help="Either upload the final df_yr1 file, or upload the three source files to calculate it"
+)
+
+market_char_file = None
+market_char_source_files = {}
+
+if market_char_option == "Upload processed Market Characterization file":
+    market_char_file = st.file_uploader(
+        "Market Characterization (Year 1) - df_yr1",
+        type=['xlsx', 'xls'],
+        help="Upload the df_yr1 market characterization output file",
+        key="market_char_direct"
+    )
+else:
+    st.markdown("**Upload the three source files for Market Characterization:**")
+    col_a, col_b, col_c = st.columns(3)
+    
+    with col_a:
+        market_char_source_files['customer_building'] = st.file_uploader(
+            "Customer Building Type Count",
+            type=['xlsx', 'xls'],
+            help="Sheet: 02_customer_building_type_count",
+            key="customer_building"
+        )
+    
+    with col_b:
+        market_char_source_files['equipment_count'] = st.file_uploader(
+            "Equipment Count per Building",
+            type=['xlsx', 'xls'],
+            help="Sheet: 02_equipment_count_per_building",
+            key="equipment_count"
+        )
+    
+    with col_c:
+        market_char_source_files['efficiency_level'] = st.file_uploader(
+            "Efficiency Level Breakout",
+            type=['xlsx', 'xls'],
+            help="Sheet: 02_efficiency_level_breakout",
+            key="efficiency_level"
+        )
+
+# Check if all required files are uploaded
+# For direct upload: need utility_forecast_file, market_char_file, condition_energy_file
+# For calculated: need utility_forecast_file, all three source files, condition_energy_file
+
+files_ready = False
+
+if market_char_option == "Upload processed Market Characterization file":
+    if utility_forecast_file and market_char_file and condition_energy_file:
+        files_ready = True
+else:
+    if (utility_forecast_file and condition_energy_file and 
+        all(market_char_source_files.values())):
+        files_ready = True
+
+if files_ready:
     
     try:
         # Progress bar
         progress_bar = st.progress(0, text="Processing data...")
+        
+        # ========== PROCESS MARKET CHARACTERIZATION DATA ==========
+        if market_char_option == "Upload processed Market Characterization file":
+            progress_bar.progress(5, text="Loading Market Characterization data...")
+            df_yr1 = pd.read_excel(market_char_file)
+        else:
+            progress_bar.progress(5, text="Calculating Market Characterization from source files...")
+            
+            # Load the three source sheets
+            customer_building_type_count = pd.read_excel(
+                market_char_source_files['customer_building'],
+                sheet_name="02_customer_building_type_count"
+            )
+            equipment_count_per_building = pd.read_excel(
+                market_char_source_files['equipment_count'],
+                sheet_name="02_equipment_count_per_building"
+            )
+            efficiency_level_breakout = pd.read_excel(
+                market_char_source_files['efficiency_level'],
+                sheet_name="02_efficiency_level_breakout"
+            )
+            
+            # Process to generate df_yr1
+            df_yr1 = process_market_characterization(
+                customer_building_type_count,
+                equipment_count_per_building,
+                efficiency_level_breakout
+            )
+            
+            st.info("✅ Market Characterization calculated from source files")
         
         # ========== LOAD AND PROCESS UTILITY FORECAST DATA ==========
         progress_bar.progress(10, text="Loading utility forecast data...")
@@ -171,10 +318,10 @@ if utility_forecast_file and market_char_file and condition_energy_file:
         by_building_series_gas = by_building_series_gas.reindex(building_cols).astype(float).fillna(0)
         allocated_mmbtu = enduse_pct_building_gas.multiply(by_building_series_gas, axis=1)
         
-        # ========== LOAD AND PROCESS MARKET CHARACTERIZATION DATA ==========
-        progress_bar.progress(55, text="Loading market characterization data...")
+        # ========== PREPARE MARKET CHARACTERIZATION DATA (df_yr1) ==========
+        progress_bar.progress(55, text="Preparing market characterization data...")
         
-        df_yr1 = pd.read_excel(market_char_file)
+        # df_yr1 was already loaded/calculated above
         df_yr1 = df_yr1.rename(columns={'condition': 'condition_name'})
         
         # Unpivot building type columns
@@ -469,23 +616,45 @@ if utility_forecast_file and market_char_file and condition_energy_file:
 
 else:
     # Instructions when files are not uploaded
-    st.info("👆 Please upload all three required files to begin the analysis")
+    st.info("👆 Please upload all required files to begin the analysis")
     
     with st.expander("ℹ️ File Requirements"):
         st.markdown("""
-        **1. Utility Forecast Disaggregation File**
+        **1. Utility Forecast Disaggregation File** (Required)
         - Must contain sheets: `Sector_Forecast`, `Building_Type_Disagg`, `Electric_Enduse_Disagg`, `Gas_Enduse_Disagg`
         - `Sector_Forecast` should have columns: `kwh_residential`, `mmbtu_residential`
         - `Building_Type_Disagg` should have columns: `single_family`, `multifamily`, `single_family_li`, `multifamily_li`
         
-        **2. Market Characterization File (Year 1)**
-        - Output from Market Characterization process (df_yr1)
+        **2. Market Characterization Input** (Required - Choose One Method)
+        
+        *Option A: Upload Processed File*
+        - Upload the final df_yr1 output from Market Characterization process
         - Should contain equipment counts by building type
         - Must have a `condition` column (will be renamed to `condition_name`)
         
-        **3. Condition Energy Usage Template**
+        *Option B: Upload Source Files and Calculate*
+        - **Customer Building Type Count**: Sheet `02_customer_building_type_count` - Number of customers by building type
+        - **Equipment Count per Building**: Sheet `02_equipment_count_per_building` - Equipment counts per building
+        - **Efficiency Level Breakout**: Sheet `02_efficiency_level_breakout` - Efficiency distribution by condition
+        - The app will automatically calculate the Market Characterization (replicates 001_Market_Characterization.ipynb)
+        
+        **3. Condition Energy Usage Template** (Required)
         - Must have Sheet1 with condition energy data
         - Should contain columns: `condition_name`, `building_type`, `annual_electric_energy_kwh`, `annual_natural_gas_therms`
+        """)
+    
+    with st.expander("💡 Why Use Source Files?"):
+        st.markdown("""
+        **Benefits of uploading source files:**
+        - Iterate quickly on customer counts, equipment distributions, and efficiency levels
+        - See immediate impact of changes without re-running notebooks
+        - Test different scenarios in real-time
+        - Single interface for the entire analysis workflow
+        
+        **When to use processed file:**
+        - You have a finalized Market Characterization output
+        - You want faster processing (skip calculation step)
+        - You're only adjusting utility forecasts or condition energy templates
         """)
 
 # Footer
