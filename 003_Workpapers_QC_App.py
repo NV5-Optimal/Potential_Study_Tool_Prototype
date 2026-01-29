@@ -45,7 +45,7 @@ def load_data():
         if text is None or pd.isna(text):
             return text
         text = str(text)
-        text = text.lower().replace(' ', '_').replace('$', 'usd').replace('/', 'per').replace('&', 'and').replace('.', '').replace('-', '_')
+        text = text.lower().replace(' ', '_').replace('$', 'usd').replace('/', 'per').replace('&', 'and').replace('.', '')
         while '__' in text:
             text = text.replace('__', '_')
         return text
